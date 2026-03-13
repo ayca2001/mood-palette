@@ -185,4 +185,332 @@ function getMixRecipe(r, g, b) {
         const sum = weights.reduce((a, b) => a + b, 0);
         if (sum > 0) weights = weights.map(w => w / sum);
     }
-    const MIN_PCT =
+    const MIN_PCT = 2;
+    let result = weights.map((w, i) => ({ ...PAINT_BASES[i], pct: Math.round(w * 1000) / 10 })).filter(p => p.pct >= MIN_PCT);
+    const total = result.reduce((s, p) => s + p.pct, 0);
+    result = result.map(p => ({ ...p, pct: Math.round(p.pct / total * 1000) / 10 }));
+    result.sort((a, b) => b.pct - a.pct);
+    return result;
+}
+
+function buildMixPanel(color) {
+    const { r, g, b, hex } = color;
+    document.getElementById('mixSwatch').style.background = hex;
+    document.getElementById('mixHex').textContent = hex;
+    const recipe = getMixRecipe(r, g, b);
+    const bars = document.getElementById('mixBars');
+    bars.innerHTML = '';
+    recipe.forEach(p => {
+        const wrap = document.createElement('div');
+        wrap.className = 'mix-bar-wrap';
+        const labelEl = document.createElement('div');
+        labelEl.className = 'mix-bar-label';
+        labelEl.textContent = p.name;
+        labelEl.style.color = p.name === 'Black' ? '#374151' : p.bg;
+        const track = document.createElement('div');
+        track.className = 'mix-bar-track';
+        const fill = document.createElement('div');
+        fill.className = 'mix-bar-fill';
+        fill.style.background = p.bg;
+        fill.style.border = p.name === 'White' ? '1px solid #cbd5e0' : 'none';
+        fill.style.width = '0%';
+        track.appendChild(fill);
+        setTimeout(() => fill.style.width = p.pct + '%', 50);
+        const pctEl = document.createElement('div');
+        pctEl.className = 'mix-bar-pct';
+        pctEl.textContent = p.pct + '%';
+        wrap.appendChild(labelEl);
+        wrap.appendChild(track);
+        wrap.appendChild(pctEl);
+        bars.appendChild(wrap);
+    });
+    const hint = document.getElementById('mixHint');
+    const top = recipe[0], second = recipe[1];
+    if (top && second) hint.textContent = `Start with ${top.pct}% ${top.name}, add ${second.pct}% ${second.name}${recipe[2] ? `, then a touch of ${recipe[2].name}` : ''}.`;
+    else if (top) hint.textContent = `Pure ${top.name}.`;
+    document.getElementById('mixPanel').classList.add('visible');
+}
+
+class ColorPaletteExtractor {
+    constructor() {
+        this.canvas = document.getElementById('canvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.uploadArea = document.getElementById('uploadArea');
+        this.fileInput = document.getElementById('fileInput');
+        this.imageContainer = document.getElementById('imageContainer');
+        this.colorList = document.getElementById('colorList');
+        this.currentImage = null;
+        this.colors = [];
+        this.indicators = [];
+        this.selectedIndex = null;
+        this.initEventListeners();
+        document.getElementById('mixClose').addEventListener('click', () => {
+            document.getElementById('mixPanel').classList.remove('visible');
+            this.clearSelection();
+        });
+    }
+    initEventListeners() {
+        this.uploadArea.addEventListener('click', () => this.fileInput.click());
+        this.fileInput.addEventListener('change', e => this.handleFileSelect(e));
+        this.uploadArea.addEventListener('dragover', e => e.preventDefault());
+        this.uploadArea.addEventListener('drop', e => { e.preventDefault(); this.handleFileSelect(e); });
+        this.imageContainer.addEventListener('click', e => { if (!this.imageContainer.classList.contains('has-image')) this.fileInput.click(); });
+        this.imageContainer.addEventListener('dragover', e => { e.preventDefault(); this.imageContainer.classList.add('dragover'); });
+        this.imageContainer.addEventListener('dragleave', e => { e.preventDefault(); this.imageContainer.classList.remove('dragover'); });
+        this.imageContainer.addEventListener('drop', e => { e.preventDefault(); this.imageContainer.classList.remove('dragover'); this.handleFileSelect(e); });
+    }
+    handleFileSelect(e) {
+        const file = e.target.files ? e.target.files[0] : e.dataTransfer.files[0];
+        if (file && file.type.startsWith('image/')) this.loadImage(file);
+    }
+    loadImage(file) {
+        document.getElementById('placeholder').classList.add('loading');
+        document.querySelector('.placeholder-text').textContent = 'Processing image...';
+        const reader = new FileReader();
+        reader.onload = e => {
+            const img = new Image();
+            img.onload = () => {
+                this.currentImage = img;
+                this.displayImage(img);
+                this.extractColors(img);
+                document.getElementById('placeholder').classList.remove('loading');
+            };
+            img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+    }
+    displayImage(img) {
+        this.clearAllIndicators();
+        document.getElementById('mixPanel').classList.remove('visible');
+        this.imageContainer.innerHTML = '';
+        this.imageContainer.classList.add('has-image');
+        const imgEl = document.createElement('img');
+        imgEl.src = img.src;
+        imgEl.className = 'image-display';
+        imgEl.id = 'displayImage';
+        this.imageContainer.appendChild(imgEl);
+    }
+    extractColors(img) {
+        this.canvas.width = img.width;
+        this.canvas.height = img.height;
+        this.ctx.fillStyle = '#FFFFFF';
+        this.ctx.fillRect(0, 0, img.width, img.height);
+        this.ctx.drawImage(img, 0, 0);
+        const imageData = this.ctx.getImageData(0, 0, img.width, img.height);
+        this.colors = this.kMeansColors(imageData.data, 5);
+        this.displayColors(this.colors);
+        this.createColorIndicators(this.colors);
+    }
+    kMeansColors(data, k) {
+        const w = this.canvas.width, h = this.canvas.height;
+        const pixels = [], pixelPositions = [];
+        for (let y = 0; y < h; y += 4) {
+            for (let x = 0; x < w; x += 4) {
+                const i = (y * w + x) * 4;
+                if (i < data.length) { pixels.push([data[i], data[i+1], data[i+2]]); pixelPositions.push({ x, y, index: pixels.length - 1 }); }
+            }
+        }
+        if (!pixels.length) return Array(k).fill().map(() => ({ r:128,g:128,b:128,hex:'#808080',position:{x:w/2,y:h/2} }));
+        let centroids = this.initDistinctCentroids(pixels, k);
+        let assignments = new Array(pixels.length);
+        for (let iter = 0; iter < 15; iter++) {
+            const clusters = Array(k).fill(null).map(() => []);
+            pixels.forEach((px, pi) => {
+                let minD = Infinity, best = 0;
+                centroids.forEach((c, ci) => { const d = this.cd(px, c); if (d < minD) { minD = d; best = ci; } });
+                clusters[best].push(px); assignments[pi] = best;
+            });
+            centroids = clusters.map((cl) => {
+                if (!cl.length) return [...pixels[Math.floor(Math.random() * pixels.length)]];
+                const s = cl.reduce((a, p) => [a[0]+p[0],a[1]+p[1],a[2]+p[2]], [0,0,0]);
+                return s.map(v => Math.round(v / cl.length));
+            });
+        }
+        centroids = this.ensureDistinct(centroids, pixels, 60);
+        const colorPositions = centroids.map((c, ci) => {
+            const cpos = pixelPositions.filter(p => assignments[p.index] === ci);
+            if (!cpos.length) return { x: (w/(k+1))*(ci+1), y: h/2 };
+            let best = cpos[0], minD = Infinity;
+            cpos.forEach(pos => { const d = this.cd(pixels[pos.index], c); if (d < minD) { minD = d; best = pos; } });
+            return { x: best.x, y: best.y };
+        });
+        const result = centroids.slice(0, k).map((rgb, i) => ({ r: rgb[0], g: rgb[1], b: rgb[2], hex: this.toHex(rgb[0], rgb[1], rgb[2]), position: colorPositions[i] || { x: w/2, y: h/2 } }));
+        while (result.length < k) result.push({ r:128,g:128,b:128,hex:'#808080',position:{x:w/2,y:h/2} });
+        return result;
+    }
+    initDistinctCentroids(pixels, k) {
+        const centroids = [[...pixels[Math.floor(Math.random() * pixels.length)]]];
+        while (centroids.length < k) {
+            let best = null, maxD = 0;
+            for (let t = 0; t < 50; t++) {
+                const c = pixels[Math.floor(Math.random() * pixels.length)];
+                const minD = Math.min(...centroids.map(e => this.cd(c, e)));
+                if (minD > maxD) { maxD = minD; best = c; }
+            }
+            centroids.push([...(best || pixels[Math.floor(Math.random() * pixels.length)])]);
+        }
+        return centroids;
+    }
+    ensureDistinct(centroids, pixels, minD) {
+        const out = [];
+        centroids.forEach(c => {
+            if (out.every(e => this.cd(c, e) >= minD)) { out.push(c); return; }
+            const counts = new Map();
+            for (let i = 0; i < Math.min(pixels.length, 1000); i += 10) { const k = pixels[i].join(','); counts.set(k, (counts.get(k)||0)+1); }
+            const sorted = [...counts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,100);
+            let replaced = false;
+            for (const [key] of sorted) {
+                const cand = key.split(',').map(Number);
+                if (out.every(e => this.cd(cand, e) >= minD)) { out.push(cand); replaced = true; break; }
+            }
+            if (!replaced) out.push([Math.min(255,c[0]+30),Math.min(255,c[1]+30),Math.min(255,c[2]+30)]);
+        });
+        return out;
+    }
+    cd(a, b) { return Math.sqrt((a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2); }
+    toHex(r, g, b) { return '#' + [r,g,b].map(x=>x.toString(16).padStart(2,'0')).join(''); }
+    displayColors(colors) {
+        this.colorList.innerHTML = '';
+        colors.forEach((color, index) => {
+            const item = document.createElement('div');
+            item.className = 'color-item';
+            item.dataset.colorIndex = index;
+            item.innerHTML = `
+                <div class="color-swatch" style="background:${color.hex}"></div>
+                <div class="color-info">
+                    <div class="color-hex">${color.hex}</div>
+                    <div class="color-rgb">RGB(${color.r}, ${color.g}, ${color.b})</div>
+                </div>
+                <div class="copy-feedback">
+                    <svg class="copy-icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </div>`;
+            item.addEventListener('click', () => { this.selectColor(index); buildMixPanel(color); this.copyColor(color.hex, item); });
+            this.colorList.appendChild(item);
+        });
+    }
+    async copyColor(hex, item) {
+        try { await navigator.clipboard.writeText(hex); } catch {}
+        const fb = item.querySelector('.copy-feedback');
+        if (fb) {
+            fb.innerHTML = `<svg class="copy-icon" viewBox="0 0 24 24"><polyline points="20,6 9,17 4,12"/></svg>`;
+            fb.classList.add('copied');
+            setTimeout(() => { fb.innerHTML = `<svg class="copy-icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2 2v1"/></svg>`; fb.classList.remove('copied'); }, 1500);
+        }
+    }
+    createColorIndicators(colors) {
+        this.clearAllIndicators();
+        const imgEl = document.getElementById('displayImage');
+        if (!imgEl) return;
+        this.positionIndicators(colors.slice(0,5), imgEl);
+    }
+    clearAllIndicators() {
+        document.querySelectorAll('.color-indicator').forEach(el => el.remove());
+        this.indicators.forEach(el => el.parentNode && el.parentNode.removeChild(el));
+        this.indicators = [];
+    }
+    positionIndicators(colors, imgEl) {
+        const rect = imgEl.getBoundingClientRect();
+        const cRect = this.imageContainer.getBoundingClientRect();
+        const sx = rect.width / this.currentImage.width;
+        const sy = rect.height / this.currentImage.height;
+        const iLeft = rect.left - cRect.left;
+        const iTop  = rect.top  - cRect.top;
+        colors.forEach((color, index) => {
+            const ind = document.createElement('div');
+            ind.className = 'color-indicator';
+            ind.style.backgroundColor = color.hex;
+            ind.dataset.colorIndex = index;
+            ind.id = `color-dot-${index}`;
+            ind.style.left = `${iLeft + color.position.x * sx - 10}px`;
+            ind.style.top  = `${iTop  + color.position.y * sy - 10}px`;
+            this.makeDraggable(ind);
+            this.imageContainer.appendChild(ind);
+            this.indicators.push(ind);
+        });
+    }
+    makeDraggable(ind) {
+        let dragging = false, sx, sy, sl, st;
+
+        const getXY = e => e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
+
+        const start = e => {
+            e.preventDefault(); e.stopPropagation();
+            dragging = true;
+            const { x, y } = getXY(e);
+            sx = x; sy = y;
+            sl = parseInt(ind.style.left); st = parseInt(ind.style.top);
+            this.selectColor(parseInt(ind.dataset.colorIndex));
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, { passive: false });
+            document.addEventListener('touchend', up);
+            document.body.style.userSelect = 'none';
+        };
+
+        const move = e => {
+            if (!dragging) return;
+            e.preventDefault();
+            const { x, y } = getXY(e);
+            ind.style.left = `${sl + x - sx}px`;
+            ind.style.top  = `${st + y - sy}px`;
+            this.updateColorFromPosition(ind);
+        };
+
+        const up = () => {
+            dragging = false;
+            this.clearSelection();
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
+            document.removeEventListener('touchmove', move);
+            document.removeEventListener('touchend', up);
+        };
+
+        ind.addEventListener('mousedown', start);
+        ind.addEventListener('touchstart', start, { passive: false });
+        ind.addEventListener('dragstart', e => e.preventDefault());
+        ind.addEventListener('click', e => {
+            e.stopPropagation();
+            const ci = parseInt(ind.dataset.colorIndex);
+            if (this.colors[ci]) { this.selectColor(ci); buildMixPanel(this.colors[ci]); }
+        });
+    }
+    selectColor(index) {
+        this.clearSelection();
+        this.selectedIndex = index;
+        const item = document.querySelector(`.color-item[data-color-index="${index}"]`);
+        const dot  = document.getElementById(`color-dot-${index}`);
+        if (item) item.classList.add('selected');
+        if (dot)  dot.classList.add('selected');
+    }
+    clearSelection() {
+        this.selectedIndex = null;
+        document.querySelectorAll('.color-item.selected').forEach(el => el && el.classList.remove('selected'));
+        document.querySelectorAll('.color-indicator.selected').forEach(el => el && el.classList.remove('selected'));
+    }
+    updateColorFromPosition(ind) {
+        const imgEl = document.getElementById('displayImage');
+        if (!imgEl || !this.currentImage) return;
+        const rect  = imgEl.getBoundingClientRect();
+        const cRect = this.imageContainer.getBoundingClientRect();
+        const x = parseInt(ind.style.left) - (rect.left - cRect.left) + 18;
+        const y = parseInt(ind.style.top)  - (rect.top  - cRect.top)  + 18;
+        const sx = this.currentImage.width  / rect.width;
+        const sy = this.currentImage.height / rect.height;
+        const ix = Math.max(0, Math.min(this.currentImage.width-1,  x * sx));
+        const iy = Math.max(0, Math.min(this.currentImage.height-1, y * sy));
+        const px = this.ctx.getImageData(ix, iy, 1, 1).data;
+        const color = { r: px[0], g: px[1], b: px[2], hex: this.toHex(px[0], px[1], px[2]) };
+        ind.style.backgroundColor = color.hex;
+        const ci = parseInt(ind.dataset.colorIndex);
+        this.colors[ci] = { ...this.colors[ci], ...color };
+        this.displayColors(this.colors);
+        this.selectColor(ci);
+        if (document.getElementById('mixPanel').classList.contains('visible')) buildMixPanel(color);
+    }
+}
+
+new ColorPaletteExtractor();
+</script>
+</body>
+</html>
